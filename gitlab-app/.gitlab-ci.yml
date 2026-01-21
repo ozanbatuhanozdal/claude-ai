@@ -1,0 +1,67 @@
+# GitLab CI/CD Configuration for Claude Code Webhook Server
+# This pipeline is triggered by the webhook server when @claude is mentioned
+
+stages:
+  - ai
+
+variables:
+  # Claude configuration
+  CLAUDE_TRIGGER_PHRASE: "@ai"
+  CLAUDE_MODEL: "sonnet"
+  CLAUDE_CODE_OAUTH_TOKEN: "$CLAUDE_CODE_OAUTH_TOKEN"
+  CLAUDE_CODE_GL_ACCESS_TOKEN: $CLAUDE_CODE_GL_ACCESS_TOKEN
+  # Branch configuration
+  CLAUDE_BRANCH_PREFIX: "ai/"
+  CLAUDE_INSTRUCTIONS: "You are a helpful assistant that fixes bugs and implements features. Always write tests for your changes. Follow the project's coding standards."
+
+
+claude_webhook_handler:
+  stage: claude
+  image: node:20-alpine
+
+  before_script:
+    - apk add --no-cache git openssh-client curl jq
+    - git config --global user.name "Claude Bot"
+    - git config --global user.email "claude-bot@${CI_SERVER_HOST}"
+    - if [ -n "$CLAUDE_DEPLOY_KEY" ]; then mkdir -p ~/.ssh; echo "$CLAUDE_DEPLOY_KEY" > ~/.ssh/id_rsa; chmod 600 ~/.ssh/id_rsa; ssh-keyscan -t rsa ${CI_SERVER_HOST} >> ~/.ssh/known_hosts; fi
+
+  script:
+    - git fetch origin "${CLAUDE_BRANCH}:${CLAUDE_BRANCH}" || true
+    - git checkout "${CLAUDE_BRANCH}" || git checkout -b "${CLAUDE_BRANCH}"
+    - node ./gitlab-app/scripts/claude-runner.js
+
+  rules:
+    - if: '$CLAUDE_TRIGGER == "true"'
+
+  artifacts:
+    paths:
+      - claude-output.json
+    expire_in: 1 week
+
+.post_response:
+  stage: claude
+  image: alpine:latest
+  needs: ["claude_webhook_handler"]
+
+  before_script:
+    - apk add --no-cache curl jq
+
+  script:
+    - CLAUDE_RESPONSE=$(jq -r '.response // "No response generated"' claude-output.json)
+    - |
+      if [ "$CLAUDE_RESOURCE_TYPE" = "merge_request" ]; then
+        curl --request POST \
+          --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+          --header "Content-Type: application/json" \
+          --data "{\"body\": \"$CLAUDE_RESPONSE\"}" \
+          "$CI_API_V4_URL/projects/$CI_PROJECT_ID/merge_requests/$CLAUDE_RESOURCE_ID/notes"
+      elif [ "$CLAUDE_RESOURCE_TYPE" = "issue" ]; then
+        curl --request POST \
+          --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+          --header "Content-Type: application/json" \
+          --data "{\"body\": \"$CLAUDE_RESPONSE\"}" \
+          "$CI_API_V4_URL/projects/$CI_PROJECT_ID/issues/$CLAUDE_RESOURCE_ID/notes"
+      fi
+
+  rules:
+    - if: '$CLAUDE_TRIGGER == "true" && $CLAUDE_AUTO_RESPOND == "true"'

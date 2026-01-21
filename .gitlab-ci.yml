@@ -1,0 +1,153 @@
+variables:
+  GIT_SUBMODULE_STRATEGY: recursive
+  GIT_SUBMODULE_FORCE_HTTPS: "true"
+  DOCKER_TLS_CERTDIR: "/certs"
+
+stages:
+  - build
+  - build90
+  - deploy
+  - forcedeploy
+
+.stage_build: &stage_build
+  after_script:
+    - docker logout $CI_REGISTRY
+  before_script:
+    ##################################################
+    ## remove when switching to own gitlab instance ##
+    - source $STACK_CI_VARIABLES
+    ##################################################
+    - apk update && apk add apache2-utils bash docker coreutils git grep make openssh-client-default openssl perl rsync zstd
+    - docker buildx create --driver=docker-container --name=$CI_PROJECT_NAME --use
+    - docker run --privileged --rm tonistiigi/binfmt --install all
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  image: alpine:latest
+  stage: build
+  tags:
+    - docker
+
+.alpine_executor: &alpine_executor
+  image: alpine:latest
+  before_script:
+    ##################################################
+    ## remove when switching to own gitlab instance ##
+    - source $STACK_CI_VARIABLES
+    ##################################################
+    - apk update && apk add apache2-utils bash coreutils git grep make openssh-client-default openssl perl rsync zstd
+  tags:
+    - docker
+
+.stage_deploy: &stage_deploy
+  <<: *alpine_executor
+  script:
+    - make DEPLOY_DIR=/srv/docker/betengine-cash-desk DEPLOY_ENV=$DEPLOY_ENV gpd-generate
+    - make DEPLOY_DIR=/srv/docker/betengine-cash-desk DEPLOY_ENV=$DEPLOY_ENV gpd-push
+    - make DEPLOY_DIR=/srv/docker/betengine-cash-desk DEPLOY_ENV=$DEPLOY_ENV gpd-deploy
+    - make DEPLOY_DIR=/srv/docker/betengine-cash-desk DEPLOY_ENV=$DEPLOY_ENV gpd-unused
+  stage: deploy
+  when: manual
+
+.stage_forcedeploy: &stage_forcedeploy
+  <<: *alpine_executor
+  script:
+    - make DEPLOY_DIR=/srv/docker/betengine-cash-desk DEPLOY_ENV=$DEPLOY_ENV gpd-generate
+    - make DEPLOY_DIR=/srv/docker/betengine-cash-desk DEPLOY_ENV=$DEPLOY_ENV gpd-push
+    - make DEPLOY_DIR=/srv/docker/betengine-cash-desk DEPLOY_ENV=$DEPLOY_ENV gpd-forcedeploy
+    - make DEPLOY_DIR=/srv/docker/betengine-cash-desk DEPLOY_ENV=$DEPLOY_ENV gpd-unused
+  stage: forcedeploy
+  when: manual
+
+build:
+  <<: *stage_build
+  script:
+    - make testenv
+    - make buildx
+    - make pushx
+    - make prunex
+
+.stage_build90: &stage_build90
+  image: alpine:latest
+  stage: build90
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "game90"'
+      when: always
+  tags:
+    - docker
+  before_script:
+    - set -x
+    - apk update && apk add --no-cache curl jq python3 py3-pip git bash docker
+    - pip install awscli --break-system-packages
+    - aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+    - aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+    - aws configure set region $AWS_DEFAULT_REGION
+    - chmod +x ./docker/scripts/*.sh
+    - ./docker/scripts/docker-login.sh
+
+build90:
+  <<: *stage_build90
+  environment:
+    name: $CI_COMMIT_BRANCH
+  script:
+    - chmod +x ./docker/scripts/*.sh
+    - ./docker/scripts/build-image.sh
+    - ./docker/scripts/tag-image.sh
+    - ./docker/scripts/push-image.sh
+
+### dev ###
+.dev_env: &dev_env
+  environment:
+    name: dev
+    url: https://cashdesk.dev.palubet.com
+
+dev:
+  <<: *stage_deploy
+  <<: *dev_env
+  variables:
+    DEPLOY_ENV: "dev"
+
+force dev:
+  <<: *stage_forcedeploy
+  variables:
+    DEPLOY_ENV: "dev"
+
+### stage ###
+.stage_env: &stage_env
+  environment:
+    name: stage
+    url: https://cashdesk.stage.palubet.com
+
+stage:
+  <<: *stage_deploy
+  <<: *stage_env
+  only:
+    - tags
+  variables:
+    DEPLOY_ENV: "stage"
+
+force stage:
+  <<: *stage_forcedeploy
+  only:
+    - tags
+  variables:
+    DEPLOY_ENV: "stage"
+
+### prod ###
+.prod_env: &prod_env
+  environment:
+    name: prod
+    url: https://cashdesk.game90.bet
+
+prod:
+  <<: *stage_deploy
+  <<: *prod_env
+  only:
+    - tags
+  variables:
+    DEPLOY_ENV: "prod"
+
+force prod:
+  <<: *stage_forcedeploy
+  only:
+    - tags
+  variables:
+    DEPLOY_ENV: "prod"
