@@ -21,15 +21,56 @@ async function getExecutionDetails(outputFile?: string): Promise<{
   
   try {
     const fs = await import("fs");
-    // Check if file exists first
-    if (!fs.existsSync(outputFile)) {
-      console.warn(`Output file not found: ${outputFile}`);
+    const path = await import("path");
+    
+    // Try multiple possible file locations
+    const tempDir = process.env.CI_BUILDS_DIR || process.env.RUNNER_TEMP || "/tmp";
+    const possibleFiles = [
+      outputFile,
+      path.join(tempDir, "claude-execution-output.json"),
+      path.join(tempDir, "output.txt"),
+    ];
+
+    let fileContent = "";
+    let foundFile = "";
+
+    // Try to read from any of the possible locations
+    for (const filePath of possibleFiles) {
+      try {
+        if (fs.existsSync(filePath)) {
+          fileContent = await fs.promises.readFile(filePath, "utf8");
+          foundFile = filePath;
+          console.log(`Reading execution details from: ${filePath}`);
+          break;
+        }
+      } catch (error) {
+        continue;
+      }
+    }
+
+    if (!fileContent) {
+      console.warn(`Output file not found in any location`);
       console.warn("This is not critical - execution details will be skipped");
       return null;
     }
 
-    const fileContent = await fs.promises.readFile(outputFile, "utf8");
-    const outputData = JSON.parse(fileContent) as SDKMessage[];
+    // Try to parse as JSON array first (if jq processed it)
+    let outputData: SDKMessage[] = [];
+    try {
+      outputData = JSON.parse(fileContent) as SDKMessage[];
+    } catch {
+      // If not JSON array, try parsing as JSONL (one JSON object per line)
+      const lines = fileContent.trim().split("\n");
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const obj = JSON.parse(line) as SDKMessage;
+          outputData.push(obj);
+        } catch {
+          // Skip invalid lines
+        }
+      }
+    }
 
     const result = outputData.find(
       (msg): msg is Extract<SDKMessage, { type: "result" }> =>

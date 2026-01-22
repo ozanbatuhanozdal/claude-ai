@@ -174,25 +174,38 @@ async function runExecutePhase(
 
     // Base-action writes to CI_BUILDS_DIR/claude-execution-output.json
     // (or RUNNER_TEMP/claude-execution-output.json for GitHub)
+    // But if jq is not available, it only creates output.txt (JSONL format)
     // We need to use the same path that base-action uses
     const tempDir = process.env.CI_BUILDS_DIR || process.env.RUNNER_TEMP || "/tmp";
     const outputFile = path.join(tempDir, "claude-execution-output.json");
+    const outputTxtFile = path.join(tempDir, "output.txt");
     
-    // Check if file exists
+    // Check if either file exists (base-action creates output.txt, then tries to convert to JSON)
     const fs = await import("fs");
-    if (!fs.existsSync(outputFile)) {
-      console.warn(`Warning: Output file not found at ${outputFile}`);
+    const jsonExists = fs.existsSync(outputFile);
+    const txtExists = fs.existsSync(outputTxtFile);
+    
+    if (!jsonExists && !txtExists) {
+      console.warn(`Warning: Output files not found at ${outputFile} or ${outputTxtFile}`);
       console.warn("Base-action may not have created the execution output file");
     } else {
-      console.log(`Output file found at: ${outputFile}`);
+      if (jsonExists) {
+        console.log(`Output file found at: ${outputFile}`);
+      }
+      if (txtExists) {
+        console.log(`Output.txt file found at: ${outputTxtFile}`);
+      }
     }
+    
+    // Use output.txt if JSON doesn't exist (jq might not be available)
+    const actualOutputFile = jsonExists ? outputFile : (txtExists ? outputTxtFile : outputFile);
 
     return {
       success: executeResult.exitCode === 0,
       error:
         executeResult.exitCode !== 0 ? "Claude execution failed" : undefined,
       commentId: prepareResult.commentId,
-      outputFile,
+      outputFile: actualOutputFile,
     };
   } catch (error) {
     console.error("Error in execute phase:", error);
@@ -204,20 +217,36 @@ async function runExecutePhase(
   }
 }
 
+/**
+ * Checks if there are any git changes in the project directory.
+ * 
+ * IMPORTANT: This function ensures we're checking the correct repository
+ * and filters out temporary files that shouldn't be committed.
+ * 
+ * Why these changes were made:
+ * 1. Previously, the code might run in /tmp/claude-code directory instead of the actual project
+ * 2. This caused it to create MRs with random files from the wrong directory
+ * 3. Now we explicitly change to CI_PROJECT_DIR and verify we're in the correct repo
+ * 4. We also clean up temp files (output.txt, logs, etc.) that base-action creates
+ *    so they don't get committed accidentally
+ */
 async function checkGitStatus(): Promise<boolean> {
   try {
     // CRITICAL: Ensure we're in the project directory, not /tmp/claude-code
+    // Problem: Previously the code might be running in the wrong directory,
+    // causing it to check git status of the wrong repository
     const projectDir = process.env.CI_PROJECT_DIR;
     if (!projectDir) {
       console.error("CI_PROJECT_DIR is not set!");
       return false;
     }
 
-    // Change to project directory
+    // Change to project directory to ensure we're checking the right repo
     process.chdir(projectDir);
     console.log(`Checking git status in: ${projectDir}`);
 
     // Verify we're in the correct repository
+    // This prevents accidentally committing to the wrong project
     const remoteResult = await $`git remote get-url origin`.quiet();
     const remoteUrl = remoteResult.stdout.toString().trim();
     const expectedProject = process.env.CI_PROJECT_PATH;
@@ -228,40 +257,45 @@ async function checkGitStatus(): Promise<boolean> {
     }
 
     // Clean up temporary files that shouldn't be committed
+    // Problem: base-action creates output.txt and other temp files in the project directory
+    // These files were being committed accidentally, creating MRs with nonsense files
+    // Solution: Delete these temp files before checking git status
     const tempPatterns = [
-      "*.log",
-      "*.tmp",
-      "output.txt",
-      ".claude-*",
-      "/tmp/claude-*",
-      "node_modules/.cache",
-      ".DS_Store",
+      "*.log",           // Log files
+      "*.tmp",           // Temporary files
+      "output.txt",      // Base-action's output file (JSONL format)
+      ".claude-*",       // Claude-related temp files
+      "/tmp/claude-*",   // Temp files in /tmp
+      "node_modules/.cache", // Node cache
+      ".DS_Store",       // macOS system file
     ];
 
     // Also clean up common temp directories
     const tempDirs = [
-      "/tmp/claude-prompts",
-      "/tmp/claude-output",
-      ".claude",
+      "/tmp/claude-prompts",  // Prompt files
+      "/tmp/claude-output",   // Output files
+      ".claude",              // Claude temp directory
     ];
 
+    // Delete temp files matching patterns
     for (const pattern of tempPatterns) {
       try {
         await $`find . -name "${pattern}" -type f -delete`.quiet();
       } catch {
-        // Ignore errors
+        // Ignore errors if files don't exist
       }
     }
 
+    // Delete temp directories
     for (const dir of tempDirs) {
       try {
         await $`rm -rf ${dir}`.quiet();
       } catch {
-        // Ignore errors
+        // Ignore errors if directories don't exist
       }
     }
 
-    // Check git status
+    // Check git status after cleanup
     const result = await $`git status --porcelain`.quiet();
     const changes = result.stdout.toString().trim();
     
@@ -269,10 +303,11 @@ async function checkGitStatus(): Promise<boolean> {
       console.log("Git changes detected:");
       console.log(changes);
       
-      // Filter out any remaining temp files
+      // Filter out any remaining temp files that might have been missed
+      // This is a safety check - we already deleted them above, but just in case
       const lines = changes.split("\n");
       const filteredLines = lines.filter(line => {
-        const file = line.substring(3).trim();
+        const file = line.substring(3).trim(); // Skip git status prefix (e.g., "?? ")
         // Exclude temp files and directories
         return !file.includes("/tmp/") &&
                !file.includes(".claude") &&
@@ -281,14 +316,17 @@ async function checkGitStatus(): Promise<boolean> {
                !file.includes("node_modules/.cache");
       });
       
+      // If all changes are temp files, return false (no real changes)
       if (filteredLines.length === 0) {
         console.log("All changes are temporary files, ignoring...");
         return false;
       }
       
+      // Real project files have changed
       return true;
     }
     
+    // No changes detected
     return false;
   } catch (error) {
     console.error("Error checking git status:", error);
@@ -493,78 +531,108 @@ async function postClaudeResponse(
     console.log("Posting Claude's response to GitLab...");
     console.log("=========================================");
 
-    // Read the output file
+    // Read the output file - try multiple possible locations
     const fs = await import("fs");
-    const outputPath =
-      executeResult.outputFile || getClaudeExecutionOutputPath();
+    const tempDir = process.env.CI_BUILDS_DIR || process.env.RUNNER_TEMP || "/tmp";
+    
+    // Try multiple possible output file locations
+    const possibleOutputFiles = [
+      executeResult.outputFile, // From executeResult
+      path.join(tempDir, "claude-execution-output.json"), // Base-action's JSON file
+      path.join(tempDir, "output.txt"), // Base-action's raw JSONL file
+      getClaudeExecutionOutputPath(), // Fallback
+    ].filter(Boolean) as string[];
 
-    try {
-      const outputContent = await fs.promises.readFile(outputPath, "utf-8");
+    let outputContent = "";
+    let outputPath = "";
 
-      // Parse the JSONL output (multiple JSON objects separated by newlines)
-      const lines = outputContent.trim().split("\n");
-      let claudeMessage = "";
-
-      // Process each line as a separate JSON object
-      for (const line of lines) {
-        if (!line.trim()) continue;
-
-        try {
-          const output = JSON.parse(line);
-
-          // Look for the result in the final result object
-          if (output.type === "result" && output.result) {
-            claudeMessage = output.result;
-            break;
-          }
-
-          // Also check assistant messages
-          if (output.type === "assistant" && output.message?.content) {
-            let tempMessage = "";
-            for (const content of output.message.content) {
-              if (content.type === "text") {
-                tempMessage += content.text + "\n";
-              }
-            }
-            if (tempMessage) {
-              claudeMessage = tempMessage.trim();
-            }
-          }
-        } catch (parseError) {
-          console.error("Error parsing line:", parseError);
-          continue;
+    // Try to read from any of the possible locations
+    for (const filePath of possibleOutputFiles) {
+      try {
+        if (fs.existsSync(filePath)) {
+          console.log(`Reading output from: ${filePath}`);
+          outputContent = await fs.promises.readFile(filePath, "utf-8");
+          outputPath = filePath;
+          break;
         }
+      } catch (error) {
+        console.log(`File not found or unreadable: ${filePath}`);
+        continue;
       }
+    }
 
-      if (!claudeMessage) {
-        console.log("No message found in Claude's output");
-        console.log("Output content:", outputContent.substring(0, 500));
-        return;
+    if (!outputContent) {
+      console.error("Could not find output file in any of these locations:");
+      possibleOutputFiles.forEach(f => console.error(`  - ${f}`));
+      return;
+    }
+
+    // Parse the JSONL output (multiple JSON objects separated by newlines)
+    const lines = outputContent.trim().split("\n");
+    let claudeMessage = "";
+
+    // Process each line as a separate JSON object
+    for (const line of lines) {
+      if (!line.trim()) continue;
+
+      try {
+        const output = JSON.parse(line);
+
+        // Look for the result in the final result object
+        if (output.type === "result" && output.result) {
+          claudeMessage = output.result;
+          console.log("Found result message in output");
+          break;
+        }
+
+        // Also check assistant messages
+        if (output.type === "assistant" && output.message?.content) {
+          let tempMessage = "";
+          for (const content of output.message.content) {
+            if (content.type === "text") {
+              tempMessage += content.text + "\n";
+            }
+          }
+          if (tempMessage) {
+            claudeMessage = tempMessage.trim();
+            console.log("Found assistant message in output");
+          }
+        }
+      } catch (parseError) {
+        // If it's not JSON, it might be plain text - use it as is
+        if (!claudeMessage && line.trim().length > 50) {
+          claudeMessage = line.trim();
+          console.log("Using plain text output");
+        }
+        continue;
       }
+    }
 
-      // Post the response as a comment
-      const provider = await import("../providers/provider-factory");
-      const scmProvider = provider.createProvider({
-        platform: "gitlab",
-        token: provider.getToken(),
-      });
+    if (!claudeMessage) {
+      console.log("No message found in Claude's output");
+      console.log("Output content preview:", outputContent.substring(0, 500));
+      return;
+    }
 
-      const formattedMessage = `## 🤖 Claude's Response
+    // Post the response as a comment
+    const provider = await import("../providers/provider-factory");
+    const scmProvider = provider.createProvider({
+      platform: "gitlab",
+      token: provider.getToken(),
+    });
+
+    const formattedMessage = `## 🤖 Claude's Response
 
 ${claudeMessage}
 
 ---
 *This response was generated by Claude AI. No code changes were made.*`;
 
-      await scmProvider.createComment(formattedMessage);
-      console.log("✅ Posted Claude's response to GitLab");
-    } catch (fileError) {
-      console.error("Error reading output file:", fileError);
-      console.error("Output path:", outputPath);
-      return;
-    }
+    await scmProvider.createComment(formattedMessage);
+    console.log("✅ Posted Claude's response to GitLab");
   } catch (error) {
     console.error("Error posting Claude's response:", error);
+    // Don't throw - this is not critical
   }
 }
 
@@ -595,11 +663,25 @@ async function runUpdatePhase(
     console.log("=========================================");
 
     // Base-action writes to CI_BUILDS_DIR/claude-execution-output.json
+    // But if jq is not available, it only creates output.txt (JSONL format)
     const tempDir = process.env.CI_BUILDS_DIR || process.env.RUNNER_TEMP || "/tmp";
     const baseActionOutputFile = path.join(tempDir, "claude-execution-output.json");
+    const baseActionOutputTxt = path.join(tempDir, "output.txt");
     
-    // Use the output file from executeResult if available, otherwise use base-action's path
-    const outputFile = executeResult.outputFile || baseActionOutputFile;
+    // Use the output file from executeResult if available, otherwise try both possible locations
+    let outputFile = executeResult.outputFile;
+    if (!outputFile) {
+      const fs = await import("fs");
+      // Prefer JSON file, but fall back to output.txt if JSON doesn't exist
+      if (fs.existsSync(baseActionOutputFile)) {
+        outputFile = baseActionOutputFile;
+      } else if (fs.existsSync(baseActionOutputTxt)) {
+        outputFile = baseActionOutputTxt;
+        console.log("Using output.txt as execution file (JSON file not found, jq may not be available)");
+      } else {
+        outputFile = baseActionOutputFile; // Default, even if it doesn't exist
+      }
+    }
 
     // Set up environment for update script
     const env = {

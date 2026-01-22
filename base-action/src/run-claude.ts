@@ -296,19 +296,53 @@ export async function runClaude(promptPath: string, options: ClaudeOptions) {
     // Ignore errors during cleanup
   }
 
+  // Helper function to convert JSONL (newline-delimited JSON) to JSON array
+  async function processOutputToJson(outputText: string): Promise<string> {
+    try {
+      // Try using jq if available (faster and more reliable)
+      const { stdout: jsonOutput } = await execAsync("jq -s '.' output.txt");
+      return jsonOutput.trim();
+    } catch (jqError) {
+      // Fallback: Parse JSONL manually using JavaScript
+      // output.txt contains one JSON object per line (JSONL format)
+      const lines = outputText.trim().split("\n");
+      const jsonArray: any[] = [];
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const obj = JSON.parse(line);
+          jsonArray.push(obj);
+        } catch (parseError) {
+          // Skip invalid JSON lines
+          console.warn(`Skipping invalid JSON line: ${line.substring(0, 100)}...`);
+        }
+      }
+
+      return JSON.stringify(jsonArray, null, 2);
+    }
+  }
+
   // Set conclusion based on exit code
   if (exitCode === 0) {
     // Try to process the output and save execution metrics
     try {
       await writeFile("output.txt", output);
 
-      // Process output.txt into JSON and save to execution file
-      const { stdout: jsonOutput } = await execAsync("jq -s '.' output.txt");
+      // Process output.txt into JSON array and save to execution file
+      // This works with or without jq installed
+      const jsonOutput = await processOutputToJson(output);
       await writeFile(EXECUTION_FILE, jsonOutput);
 
       console.log(`Log saved to ${EXECUTION_FILE}`);
     } catch (e) {
       core.warning(`Failed to process output for execution metrics: ${e}`);
+      // Still save output.txt even if JSON conversion fails
+      try {
+        await writeFile("output.txt", output);
+      } catch (writeError) {
+        // Ignore write errors
+      }
     }
 
     core.setOutput("conclusion", "success");
@@ -320,11 +354,12 @@ export async function runClaude(promptPath: string, options: ClaudeOptions) {
     if (output) {
       try {
         await writeFile("output.txt", output);
-        const { stdout: jsonOutput } = await execAsync("jq -s '.' output.txt");
+        const jsonOutput = await processOutputToJson(output);
         await writeFile(EXECUTION_FILE, jsonOutput);
         core.setOutput("execution_file", EXECUTION_FILE);
       } catch (e) {
         // Ignore errors when processing output during failure
+        // At least output.txt is saved
       }
     }
 
