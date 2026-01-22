@@ -14,9 +14,21 @@ async function getExecutionDetails(outputFile?: string): Promise<{
   cost_usd?: number;
   duration_ms?: number;
 } | null> {
-  if (!outputFile) return null;
+  if (!outputFile) {
+    console.log("No output file provided, skipping execution details");
+    return null;
+  }
+  
   try {
-    const fileContent = await fs.readFile(outputFile, "utf8");
+    const fs = await import("fs");
+    // Check if file exists first
+    if (!fs.existsSync(outputFile)) {
+      console.warn(`Output file not found: ${outputFile}`);
+      console.warn("This is not critical - execution details will be skipped");
+      return null;
+    }
+
+    const fileContent = await fs.promises.readFile(outputFile, "utf8");
     const outputData = JSON.parse(fileContent) as SDKMessage[];
 
     const result = outputData.find(
@@ -31,7 +43,9 @@ async function getExecutionDetails(outputFile?: string): Promise<{
       };
     }
   } catch (error) {
+    // Don't fail the entire update if we can't read execution details
     core.warning(`Error reading or parsing output file: ${error}`);
+    console.warn("Continuing without execution details...");
   }
   return null;
 }
@@ -95,8 +109,25 @@ async function run() {
       process.env.CLAUDE_CODE_OAUTH_TOKEN ||
       process.env.GITLAB_TOKEN;
 
-    if (!projectId || (!mrIid && !issueIid) || !gitlabToken) {
-      throw new Error("Missing required GitLab environment variables");
+    // Debug: Print environment variables
+    console.log("GitLab context:");
+    console.log(`  Project ID: ${projectId || "NOT SET"}`);
+    console.log(`  MR IID: ${mrIid || "NOT SET"}`);
+    console.log(`  Issue IID: ${issueIid || "NOT SET"}`);
+    console.log(`  Comment ID: ${commentId}`);
+    console.log(`  GitLab Host: ${gitlabHost}`);
+    console.log(`  Token available: ${!!gitlabToken}`);
+
+    if (!projectId) {
+      throw new Error("CI_PROJECT_ID is required but not set");
+    }
+    
+    if (!mrIid && !issueIid) {
+      throw new Error(`Neither CI_MERGE_REQUEST_IID nor CI_ISSUE_IID is set. CLAUDE_RESOURCE_ID: ${process.env.CLAUDE_RESOURCE_ID}`);
+    }
+    
+    if (!gitlabToken) {
+      throw new Error("GitLab token is required but not set (check CLAUDE_CODE_GL_ACCESS_TOKEN, CLAUDE_CODE_OAUTH_TOKEN, or GITLAB_TOKEN)");
     }
 
     // Initialize GitLab API
@@ -122,6 +153,7 @@ async function run() {
 
       if (mrIid) {
         // Merge request context
+        console.log(`Fetching notes for MR ${mrIid} in project ${projectId}...`);
         notes = (await api.MergeRequestNotes.all(
           projectId,
           parseInt(mrIid),
@@ -130,6 +162,7 @@ async function run() {
         resourceIid = parseInt(mrIid);
       } else if (issueIid) {
         // Issue context
+        console.log(`Fetching notes for issue ${issueIid} in project ${projectId}...`);
         notes = (await api.IssueNotes.all(
           projectId,
           parseInt(issueIid),
@@ -140,10 +173,17 @@ async function run() {
         throw new Error("No merge request or issue context found");
       }
 
+      console.log(`Found ${notes.length} notes, looking for comment ID ${commentId}...`);
+
       const originalComment = notes.find((note) => note.id === commentId);
       if (!originalComment) {
-        throw new Error(`Could not find GitLab note ID ${commentId}`);
+        // List available comment IDs for debugging
+        const availableIds = notes.map(n => n.id).slice(0, 10);
+        console.error(`Available comment IDs (first 10): ${availableIds.join(", ")}`);
+        throw new Error(`Could not find GitLab note ID ${commentId} in ${resourceType} ${resourceIid}. Available IDs: ${availableIds.join(", ")}`);
       }
+
+      console.log(`Found original comment: ${originalComment.id}`);
 
       // Get job URL
       const pipelineId = process.env.CI_PIPELINE_ID;
@@ -160,6 +200,7 @@ async function run() {
       );
 
       // Update the comment
+      console.log(`Updating ${resourceType} note ${commentId}...`);
       if (mrIid) {
         await api.MergeRequestNotes.edit(projectId, resourceIid, commentId, {
           body: updatedBody,
@@ -172,12 +213,17 @@ async function run() {
 
       console.log(`✅ Updated GitLab ${resourceType} note ${commentId}.`);
     } catch (error) {
-      throw new Error(`Failed to fetch or update comment: ${error}`);
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error(`Error details: ${errorMsg}`);
+      throw new Error(`Failed to fetch or update comment: ${errorMsg}`);
     }
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    core.setFailed(`Failed to update GitLab comment: ${errorMessage}`);
-    process.exit(1);
+    // Use warning instead of setFailed to not fail the job
+    core.warning(`Failed to update GitLab comment: ${errorMessage}`);
+    console.error("Comment update failed, but this is not critical");
+    // Don't exit with error code - comment update failure shouldn't fail the job
+    process.exit(0);
   }
 }
 

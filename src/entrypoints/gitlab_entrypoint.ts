@@ -172,7 +172,20 @@ async function runExecutePhase(
       console.error(executeResult.stderr.toString());
     }
 
-    const outputFile = getClaudeExecutionOutputPath();
+    // Base-action writes to CI_BUILDS_DIR/claude-execution-output.json
+    // (or RUNNER_TEMP/claude-execution-output.json for GitHub)
+    // We need to use the same path that base-action uses
+    const tempDir = process.env.CI_BUILDS_DIR || process.env.RUNNER_TEMP || "/tmp";
+    const outputFile = path.join(tempDir, "claude-execution-output.json");
+    
+    // Check if file exists
+    const fs = await import("fs");
+    if (!fs.existsSync(outputFile)) {
+      console.warn(`Warning: Output file not found at ${outputFile}`);
+      console.warn("Base-action may not have created the execution output file");
+    } else {
+      console.log(`Output file found at: ${outputFile}`);
+    }
 
     return {
       success: executeResult.exitCode === 0,
@@ -193,19 +206,90 @@ async function runExecutePhase(
 
 async function checkGitStatus(): Promise<boolean> {
   try {
-    // Clean up any temporary output files before checking git status
-    // These files might be created by Claude Code during execution
-    const tempFiles = ["output.txt", "*.log", "*.tmp"];
-    for (const pattern of tempFiles) {
+    // CRITICAL: Ensure we're in the project directory, not /tmp/claude-code
+    const projectDir = process.env.CI_PROJECT_DIR;
+    if (!projectDir) {
+      console.error("CI_PROJECT_DIR is not set!");
+      return false;
+    }
+
+    // Change to project directory
+    process.chdir(projectDir);
+    console.log(`Checking git status in: ${projectDir}`);
+
+    // Verify we're in the correct repository
+    const remoteResult = await $`git remote get-url origin`.quiet();
+    const remoteUrl = remoteResult.stdout.toString().trim();
+    const expectedProject = process.env.CI_PROJECT_PATH;
+    
+    if (expectedProject && !remoteUrl.includes(expectedProject)) {
+      console.error(`Wrong repository! Expected ${expectedProject}, got ${remoteUrl}`);
+      return false;
+    }
+
+    // Clean up temporary files that shouldn't be committed
+    const tempPatterns = [
+      "*.log",
+      "*.tmp",
+      "output.txt",
+      ".claude-*",
+      "/tmp/claude-*",
+      "node_modules/.cache",
+      ".DS_Store",
+    ];
+
+    // Also clean up common temp directories
+    const tempDirs = [
+      "/tmp/claude-prompts",
+      "/tmp/claude-output",
+      ".claude",
+    ];
+
+    for (const pattern of tempPatterns) {
       try {
-        await $`rm -f ${pattern}`.quiet();
+        await $`find . -name "${pattern}" -type f -delete`.quiet();
       } catch {
-        // Ignore errors if files don't exist
+        // Ignore errors
       }
     }
 
+    for (const dir of tempDirs) {
+      try {
+        await $`rm -rf ${dir}`.quiet();
+      } catch {
+        // Ignore errors
+      }
+    }
+
+    // Check git status
     const result = await $`git status --porcelain`.quiet();
-    return result.stdout.toString().trim().length > 0;
+    const changes = result.stdout.toString().trim();
+    
+    if (changes) {
+      console.log("Git changes detected:");
+      console.log(changes);
+      
+      // Filter out any remaining temp files
+      const lines = changes.split("\n");
+      const filteredLines = lines.filter(line => {
+        const file = line.substring(3).trim();
+        // Exclude temp files and directories
+        return !file.includes("/tmp/") &&
+               !file.includes(".claude") &&
+               !file.endsWith(".log") &&
+               !file.endsWith(".tmp") &&
+               !file.includes("node_modules/.cache");
+      });
+      
+      if (filteredLines.length === 0) {
+        console.log("All changes are temporary files, ignoring...");
+        return false;
+      }
+      
+      return true;
+    }
+    
+    return false;
   } catch (error) {
     console.error("Error checking git status:", error);
     return false;
@@ -221,6 +305,50 @@ async function createMergeRequest(
     console.log("Creating GitLab Merge Request...");
     console.log("=========================================");
 
+    // CRITICAL: Ensure we're in the project directory
+    const projectDir = process.env.CI_PROJECT_DIR;
+    if (!projectDir) {
+      throw new Error("CI_PROJECT_DIR is not set!");
+    }
+
+    // Change to project directory
+    process.chdir(projectDir);
+    console.log(`Working in project directory: ${projectDir}`);
+
+    // Verify we're in the correct repository
+    const remoteResult = await $`git remote get-url origin`.quiet();
+    const remoteUrl = remoteResult.stdout.toString().trim();
+    const expectedProject = process.env.CI_PROJECT_PATH;
+    
+    if (expectedProject && !remoteUrl.includes(expectedProject)) {
+      throw new Error(`Wrong repository! Expected ${expectedProject}, but working in ${remoteUrl}`);
+    }
+
+    console.log(`Verified repository: ${remoteUrl}`);
+
+    // Clean up temporary files before committing
+    console.log("Cleaning up temporary files...");
+    const tempPatterns = [
+      "*.log",
+      "*.tmp",
+      "output.txt",
+      ".claude-*",
+      ".DS_Store",
+    ];
+
+    for (const pattern of tempPatterns) {
+      try {
+        await $`find . -name "${pattern}" -type f -not -path "*/node_modules/*" -delete`.quiet();
+      } catch {
+        // Ignore errors
+      }
+    }
+
+    // Get current branch
+    const currentBranchResult = await $`git rev-parse --abbrev-ref HEAD`.quiet();
+    const currentBranch = currentBranchResult.stdout.toString().trim();
+    console.log(`Current branch: ${currentBranch}`);
+
     // Get branch name based on context
     const timestamp = Date.now();
     const branchName =
@@ -231,17 +359,65 @@ async function createMergeRequest(
     await $`git config user.name "Claude[bot]"`.quiet();
     await $`git config user.email "claude-bot@noreply.gitlab.com"`.quiet();
 
-    // Create and checkout new branch
-    await $`git checkout -b ${branchName}`.quiet();
-    console.log(`Created branch: ${branchName}`);
+    // Only create new branch if we're not already on it
+    if (currentBranch !== branchName) {
+      // Create and checkout new branch
+      await $`git checkout -b ${branchName}`.quiet();
+      console.log(`Created branch: ${branchName}`);
+    } else {
+      console.log(`Already on branch: ${branchName}`);
+    }
 
-    // Add all changes
+    // Show what files are changed before adding
+    console.log("Checking git status before adding files...");
+    const statusBeforeResult = await $`git status --porcelain`.quiet();
+    const statusBefore = statusBeforeResult.stdout.toString().trim();
+    
+    if (!statusBefore) {
+      console.log("No changes to commit!");
+      return;
+    }
+
+    console.log("Files changed:");
+    console.log(statusBefore);
+
+    // Add changes, but exclude temp files explicitly
     await $`git add -A`.quiet();
+    
+    // Remove any temp files that might have been added
+    try {
+      await $`git reset HEAD -- "*.log" "*.tmp" "output.txt" ".claude-*" "/tmp/*"`.quiet();
+      await $`git checkout -- "*.log" "*.tmp" "output.txt" ".claude-*" "/tmp/*"`.quiet();
+    } catch {
+      // Ignore if no such files
+    }
 
-    // Show what files were changed
+    // Show what files will be committed
     console.log("Files to be committed:");
     const statusResult = await $`git status --short`.quiet();
-    console.log(statusResult.stdout.toString());
+    const statusOutput = statusResult.stdout.toString().trim();
+    
+    if (!statusOutput) {
+      console.log("No valid changes to commit after filtering temp files!");
+      return;
+    }
+    
+    console.log(statusOutput);
+
+    // Verify we have actual project files, not just temp files
+    const lines = statusOutput.split("\n");
+    const validFiles = lines.filter(line => {
+      const file = line.substring(3).trim();
+      return !file.includes("/tmp/") &&
+             !file.includes(".claude") &&
+             !file.endsWith(".log") &&
+             !file.endsWith(".tmp");
+    });
+
+    if (validFiles.length === 0) {
+      console.log("No valid project files to commit, aborting MR creation");
+      return;
+    }
 
     // Commit with descriptive message
     const commitMessage = `fix: Apply Claude's suggestions for ${process.env.CLAUDE_RESOURCE_TYPE} #${process.env.CLAUDE_RESOURCE_ID}
@@ -257,12 +433,10 @@ See the original ${process.env.CLAUDE_RESOURCE_TYPE} for context.`;
     const mrTitle = `Apply Claude's suggestions for ${process.env.CLAUDE_RESOURCE_TYPE} #${process.env.CLAUDE_RESOURCE_ID}`;
 
     // GitLab push options cannot contain newlines, so we'll use a simpler description
-    // and rely on the commit message for details
     const resourceUrl = `${process.env.CI_SERVER_URL}/${process.env.CI_PROJECT_PATH}/-/${process.env.CLAUDE_RESOURCE_TYPE === "issue" ? "issues" : "merge_requests"}/${process.env.CLAUDE_RESOURCE_ID}`;
     const mrDescription = `Automated MR by Claude AI. See ${resourceUrl} for context. /cc @${process.env.GITLAB_USER_LOGIN || "claude"}`;
 
     // Set up git remote with proper authentication
-    // Use CLAUDE_CODE_GL_ACCESS_TOKEN if available, otherwise fall back to CI_JOB_TOKEN
     const gitToken =
       process.env.CLAUDE_CODE_GL_ACCESS_TOKEN || process.env.CI_JOB_TOKEN;
     const tokenType = process.env.CLAUDE_CODE_GL_ACCESS_TOKEN
@@ -275,9 +449,6 @@ See the original ${process.env.CLAUDE_RESOURCE_TYPE} for context.`;
     await $`git remote set-url origin ${gitRemoteUrl}`.quiet();
 
     // Push with MR creation options
-    // Note: GitLab push options have limitations:
-    // - No newlines allowed in description
-    // - Limited character length
     const pushResult = await $`git push \
       -o merge_request.create \
       -o merge_request.target=${targetBranch} \
@@ -423,22 +594,54 @@ async function runUpdatePhase(
     console.log("Phase 5: Updating tracking comment...");
     console.log("=========================================");
 
+    // Base-action writes to CI_BUILDS_DIR/claude-execution-output.json
+    const tempDir = process.env.CI_BUILDS_DIR || process.env.RUNNER_TEMP || "/tmp";
+    const baseActionOutputFile = path.join(tempDir, "claude-execution-output.json");
+    
+    // Use the output file from executeResult if available, otherwise use base-action's path
+    const outputFile = executeResult.outputFile || baseActionOutputFile;
+
     // Set up environment for update script
     const env = {
       ...process.env,
       CLAUDE_COMMENT_ID: prepareResult.commentId.toString(),
       CLAUDE_SUCCESS: executeResult.success ? "true" : "false",
       PREPARE_SUCCESS: prepareResult.success ? "true" : "false",
-      OUTPUT_FILE: executeResult.outputFile || getClaudeExecutionOutputPath(),
+      OUTPUT_FILE: outputFile,
     };
+
+    // Ensure CI_PROJECT_ID is set
+    if (!env.CI_PROJECT_ID && process.env.CI_PROJECT_ID) {
+      env.CI_PROJECT_ID = process.env.CI_PROJECT_ID;
+    }
 
     // If we're in issue context, ensure CI_ISSUE_IID is set
     if (
       process.env.CLAUDE_RESOURCE_TYPE === "issue" &&
       process.env.CLAUDE_RESOURCE_ID
     ) {
-      (env as any).CI_ISSUE_IID = process.env.CLAUDE_RESOURCE_ID;
+      env.CI_ISSUE_IID = process.env.CLAUDE_RESOURCE_ID;
+      console.log(`Set CI_ISSUE_IID=${env.CI_ISSUE_IID} for issue context`);
     }
+
+    // If we're in MR context, ensure CI_MERGE_REQUEST_IID is set
+    if (
+      process.env.CLAUDE_RESOURCE_TYPE === "merge_request" &&
+      process.env.CLAUDE_RESOURCE_ID
+    ) {
+      env.CI_MERGE_REQUEST_IID = process.env.CLAUDE_RESOURCE_ID;
+      console.log(`Set CI_MERGE_REQUEST_IID=${env.CI_MERGE_REQUEST_IID} for MR context`);
+    }
+
+    // Debug: Print environment variables
+    console.log("Environment variables for update script:");
+    console.log(`  CLAUDE_COMMENT_ID: ${env.CLAUDE_COMMENT_ID}`);
+    console.log(`  CI_PROJECT_ID: ${env.CI_PROJECT_ID || "NOT SET"}`);
+    console.log(`  CI_ISSUE_IID: ${env.CI_ISSUE_IID || "NOT SET"}`);
+    console.log(`  CI_MERGE_REQUEST_IID: ${env.CI_MERGE_REQUEST_IID || "NOT SET"}`);
+    console.log(`  OUTPUT_FILE: ${env.OUTPUT_FILE}`);
+    console.log(`  CLAUDE_RESOURCE_TYPE: ${process.env.CLAUDE_RESOURCE_TYPE || "NOT SET"}`);
+    console.log(`  CLAUDE_RESOURCE_ID: ${process.env.CLAUDE_RESOURCE_ID || "NOT SET"}`);
 
     // Run update script
     const updateScript = path.join(__dirname, "update-comment-gitlab.ts");
@@ -447,13 +650,14 @@ async function runUpdatePhase(
     console.log(updateResult.stdout.toString());
 
     if (updateResult.exitCode !== 0) {
-      console.error(
-        "Failed to update comment:",
-        updateResult.stderr.toString(),
-      );
+      const stderr = updateResult.stderr.toString();
+      console.error("Failed to update comment:", stderr);
+      
+      // Don't fail the entire job - comment update is not critical
+      console.warn("Warning: Comment update failed, but job will continue");
       return {
         success: false,
-        error: "Failed to update comment",
+        error: "Failed to update comment (non-critical)",
       };
     }
 
