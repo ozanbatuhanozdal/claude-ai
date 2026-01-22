@@ -11,8 +11,8 @@ claude_webhook_handler:
     name: claude-code
 
   before_script:
-    # Install required packages
-    - apt-get update && apt-get install -y git openssh-client
+    # Install required packages (including jq for output processing)
+    - apt-get update && apt-get install -y git openssh-client jq
 
     # Clone Claude Code
     - git clone https://gitlab.tech90.cloud/teknosoft2/gitlab-claude.git /tmp/claude-code

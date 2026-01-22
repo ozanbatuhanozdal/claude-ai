@@ -9,11 +9,11 @@ claude_webhook_handler:
   environment:
     name: claude-code
   before_script:
-    # Install git for repository operations
-    - apt-get update && apt-get install -y git openssh-client
+    # Install git and jq for repository operations and output processing
+    - apt-get update && apt-get install -y git openssh-client jq
 
     # Clone Claude Code for GitLab
-    - git clone https://github.com/RealMikeChong/claude-code-for-gitlab.git /tmp/claude-code
+    - git clone https://gitlab.tech90.cloud/teknosoft2/gitlab-claude.git /tmp/claude-code
     - cd /tmp/claude-code
     - bun install
 
