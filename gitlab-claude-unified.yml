@@ -56,9 +56,12 @@ claude_webhook_handler:
     - if: '$CLAUDE_TRIGGER == "true"'
 
   variables:
-    # Authentication
-    CLAUDE_CODE_OAUTH_TOKEN: "${CLAUDE_CODE_OAUTH_TOKEN}"
-    CLAUDE_CODE_GL_ACCESS_TOKEN: "${CLAUDE_CODE_GL_ACCESS_TOKEN}"
+    # IMPORTANT: Authentication variables must be set in GitLab CI/CD Variables
+    # Go to: Project Settings → CI/CD → Variables
+    # Required variables:
+    #   - CLAUDE_CODE_OAUTH_TOKEN: Your Claude Code OAuth token
+    #   - CLAUDE_CODE_GL_ACCESS_TOKEN: Your GitLab Personal/Project Access Token (with 'api' scope)
+    # These variables will be automatically available to the job and do NOT need to be defined here.
 
     # Claude behavior
     CLAUDE_TRIGGER_PHRASE: "@claude"
