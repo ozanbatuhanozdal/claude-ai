@@ -142,4 +142,82 @@ export function createProvider(options: ProviderFactoryOptions): SCMProvider {
   }
 }
 
-// ... rest of the code (getToken function stays the same) ...
+
+/**
+ * Gets the appropriate token based on the platform
+ */
+export function getToken(): string {
+  const platform = detectPlatform();
+
+  if (platform === "gitlab") {
+    // Check for GitLab access token first (highest priority)
+    const glAccessToken = process.env.CLAUDE_CODE_GL_ACCESS_TOKEN;
+    if (glAccessToken) {
+      // Check if the token is a literal environment variable string (not expanded)
+      if (glAccessToken.startsWith("$")) {
+        console.error(
+          `ERROR: CLAUDE_CODE_GL_ACCESS_TOKEN appears to be unexpanded: "${glAccessToken}"`,
+        );
+        console.error(
+          `This usually means the variable is not defined in GitLab CI/CD settings.`,
+        );
+        console.error(
+          `Please add CLAUDE_CODE_GL_ACCESS_TOKEN to your GitLab project's CI/CD variables.`,
+        );
+        // Don't use this invalid token
+      } else {
+        console.log(
+          `Using CLAUDE_CODE_GL_ACCESS_TOKEN for GitLab authentication (length: ${glAccessToken.length})`,
+        );
+        return glAccessToken;
+      }
+    }
+
+    // Check for OAuth token (new method)
+    const oauthToken =
+      process.env.CLAUDE_CODE_OAUTH_TOKEN ||
+      core.getInput("claude_code_oauth_token");
+    if (oauthToken) {
+      console.log("Using Claude Code OAuth token for GitLab authentication");
+      return oauthToken;
+    }
+
+    // Fall back to traditional GitLab token
+    const token = process.env.GITLAB_TOKEN || core.getInput("gitlab_token");
+    if (!token) {
+      throw new Error(
+        "GitLab authentication required (CLAUDE_CODE_GL_ACCESS_TOKEN, CLAUDE_CODE_OAUTH_TOKEN, GITLAB_TOKEN, or gitlab_token input)",
+      );
+    }
+    return token;
+  }
+
+  // For GitHub, check OAuth token first
+  const oauthToken =
+    process.env.CLAUDE_CODE_OAUTH_TOKEN ||
+    core.getInput("claude_code_oauth_token");
+  if (oauthToken) {
+    console.log("Using Claude Code OAuth token for GitHub authentication");
+    return oauthToken;
+  }
+
+  // Fall back to traditional GitHub token sources
+  const githubToken =
+    core.getInput("github_token") ||
+    process.env.GITHUB_TOKEN ||
+    core.getInput("anthropic_api_key"); // Backward compatibility
+
+  if (!githubToken) {
+    throw new Error(
+      "GitHub authentication required (claude_code_oauth_token or github_token)",
+    );
+  }
+
+  return githubToken;
+}
+
+/**
+ * Export all providers for direct access if needed
+ */
+export { GitHubProvider, GitLabProvider };
+export type { SCMProvider } from "./scm-provider";
