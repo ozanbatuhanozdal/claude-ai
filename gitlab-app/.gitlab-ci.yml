@@ -8,8 +8,6 @@ variables:
   # Claude configuration
   CLAUDE_TRIGGER_PHRASE: "@ai"
   CLAUDE_MODEL: "sonnet"
-  CLAUDE_CODE_OAUTH_TOKEN: "$CLAUDE_CODE_OAUTH_TOKEN"
-  CLAUDE_CODE_GL_ACCESS_TOKEN: $CLAUDE_CODE_GL_ACCESS_TOKEN
   # Branch configuration
   CLAUDE_BRANCH_PREFIX: "ai/"
   CLAUDE_INSTRUCTIONS: "You are a helpful assistant that fixes bugs and implements features. Always write tests for your changes. Follow the project's coding standards."
