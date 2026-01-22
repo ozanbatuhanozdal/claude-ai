@@ -615,52 +615,104 @@ async function postClaudeResponse(
       return;
     }
 
-    // Parse the JSONL output (multiple JSON objects separated by newlines)
-    const lines = outputContent.trim().split("\n");
+    // Parse the output - could be JSON array or JSONL (one JSON object per line)
     let claudeMessage = "";
+    let outputData: any[] = [];
 
-    // Process each line as a separate JSON object
-    for (const line of lines) {
-      if (!line.trim()) continue;
+    // Try parsing as JSON array first
+    try {
+      const parsed = JSON.parse(outputContent);
+      if (Array.isArray(parsed)) {
+        outputData = parsed;
+        console.log(`Parsed as JSON array with ${outputData.length} items`);
+      } else {
+        // Single JSON object, wrap in array
+        outputData = [parsed];
+        console.log("Parsed as single JSON object");
+      }
+    } catch {
+      // If not JSON array, try JSONL format (one JSON object per line)
+      const lines = outputContent.trim().split("\n");
+      console.log(`Parsing as JSONL format with ${lines.length} lines`);
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const parsed = JSON.parse(line);
+          outputData.push(parsed);
+        } catch (parseError) {
+          // Skip invalid lines
+          console.log(`Skipping invalid JSON line: ${line.substring(0, 50)}...`);
+        }
+      }
+    }
 
-      try {
-        const output = JSON.parse(line);
-
-        // Look for the result in the final result object
-        if (output.type === "result" && output.result) {
+    // Process all parsed objects to find the result
+    for (const output of outputData) {
+      // Look for the result in the final result object
+      if (output.type === "result" && output.result) {
+        // Ensure result is a string, not an object
+        if (typeof output.result === "string") {
           claudeMessage = output.result;
-          console.log("Found result message in output");
+          console.log("Found result message in output (string)");
+          break;
+        } else {
+          // If result is an object, stringify it (shouldn't happen, but handle it)
+          console.warn("Result field is not a string, converting to JSON");
+          claudeMessage = JSON.stringify(output.result, null, 2);
           break;
         }
+      }
 
-        // Also check assistant messages
-        if (output.type === "assistant" && output.message?.content) {
-          let tempMessage = "";
-          for (const content of output.message.content) {
-            if (content.type === "text") {
-              tempMessage += content.text + "\n";
-            }
-          }
-          if (tempMessage) {
-            claudeMessage = tempMessage.trim();
-            console.log("Found assistant message in output");
+      // Also check assistant messages
+      if (output.type === "assistant" && output.message?.content) {
+        let tempMessage = "";
+        for (const content of output.message.content) {
+          if (content.type === "text") {
+            tempMessage += content.text + "\n";
           }
         }
-      } catch (parseError) {
-        // If it's not JSON, it might be plain text - use it as is
-        if (!claudeMessage && line.trim().length > 50) {
-          claudeMessage = line.trim();
-          console.log("Using plain text output");
+        if (tempMessage) {
+          claudeMessage = tempMessage.trim();
+          console.log("Found assistant message in output");
         }
-        continue;
       }
     }
 
     if (!claudeMessage) {
       console.log("No message found in Claude's output");
       console.log("Output content preview:", outputContent.substring(0, 500));
+      console.log("Output data structure:", JSON.stringify(outputData.slice(0, 2), null, 2));
       return;
     }
+
+    // Safety check: Ensure we're not accidentally posting the entire JSON object
+    // If claudeMessage looks like JSON with session_id, something went wrong
+    if (claudeMessage.includes('"session_id"') && claudeMessage.includes('"type"') && claudeMessage.includes('"result"')) {
+      console.error("⚠️ WARNING: Detected entire JSON object in message, attempting to extract result field");
+      try {
+        const parsed = JSON.parse(claudeMessage);
+        if (parsed.type === "result" && typeof parsed.result === "string") {
+          claudeMessage = parsed.result;
+          console.log("✅ Successfully extracted result field from JSON object");
+        } else {
+          console.error("❌ Failed to extract result from JSON object");
+          return;
+        }
+      } catch (parseError) {
+        console.error("❌ Failed to parse JSON object from message");
+        return;
+      }
+    }
+
+    // Additional safety: Ensure message doesn't start with { (JSON object)
+    if (claudeMessage.trim().startsWith("{") && claudeMessage.includes("session_id")) {
+      console.error("❌ ERROR: Message appears to be a JSON object, not the result text");
+      console.error("Message preview:", claudeMessage.substring(0, 200));
+      return;
+    }
+
+    console.log(`Message length: ${claudeMessage.length} characters`);
+    console.log(`Message preview: ${claudeMessage.substring(0, 100)}...`);
 
     // Post the response as a comment
     const provider = await import("../providers/provider-factory");
