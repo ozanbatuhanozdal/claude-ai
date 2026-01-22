@@ -142,8 +142,9 @@ app.post("/webhook", async (c) => {
     resourceId: mrIid || issueIid,
   });
 
-  // Determine branch ref
+  // Determine branch ref and base branch
   let ref = body.merge_request?.source_branch;
+  let baseBranch = body.merge_request?.target_branch; // For MRs, use the MR's target branch
 
   // For issues, create a branch
   if (issueIid && !mrIid) {
@@ -151,6 +152,7 @@ app.post("/webhook", async (c) => {
       // Get project details for default branch
       const project = await getProject(projectId);
       const defaultBranch = project.default_branch || "main";
+      baseBranch = defaultBranch; // Store the base branch for pipeline
 
       // Generate branch name with timestamp to ensure uniqueness
       const timestamp = Date.now();
@@ -178,6 +180,17 @@ app.post("/webhook", async (c) => {
     // For merge requests without a source branch, fail
     logger.error("No branch ref determined for merge request");
     return c.text("no-branch-ref", 400);
+  }
+
+  // If we still don't have a base branch, fetch it from the project
+  if (!baseBranch) {
+    try {
+      const project = await getProject(projectId);
+      baseBranch = project.default_branch || "main";
+    } catch (error) {
+      logger.warn("Failed to fetch default branch, falling back to 'main'");
+      baseBranch = "main";
+    }
   }
 
   // Extract the prompt after the trigger phrase
@@ -225,6 +238,7 @@ app.post("/webhook", async (c) => {
     CLAUDE_NOTE: note,
     CLAUDE_PROJECT_PATH: projectPath,
     CLAUDE_BRANCH: ref,
+    CLAUDE_BASE_BRANCH: baseBranch, // The target/base branch for MRs and diffs
     TRIGGER_PHRASE: triggerPhrase,
     DIRECT_PROMPT: directPrompt,
     GITLAB_WEBHOOK_PAYLOAD: JSON.stringify(minimalPayload),

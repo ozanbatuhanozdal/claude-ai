@@ -512,7 +512,10 @@ See the original ${process.env.CLAUDE_RESOURCE_TYPE} for context.`;
     console.log("Committed changes");
 
     // Push with GitLab push options to create MR
-    const targetBranch = process.env.CI_DEFAULT_BRANCH || "main";
+    // Use CLAUDE_BASE_BRANCH (set by webhook) or fall back to CI_DEFAULT_BRANCH
+    const targetBranch = process.env.CLAUDE_BASE_BRANCH || process.env.CI_DEFAULT_BRANCH || "main";
+    console.log(`Target branch for MR: ${targetBranch}`);
+
     const mrTitle = `Apply Claude's suggestions for ${process.env.CLAUDE_RESOURCE_TYPE} #${process.env.CLAUDE_RESOURCE_ID}`;
 
     // GitLab push options cannot contain newlines, so we'll use a simpler description

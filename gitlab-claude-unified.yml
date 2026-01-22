@@ -65,6 +65,7 @@ claude_webhook_handler:
 
     # IMPORTANT: The following variables are automatically set by the webhook server:
     #   - CLAUDE_BRANCH: The branch Claude should work on (created for issues, source branch for MRs)
+    #   - CLAUDE_BASE_BRANCH: The target/base branch (your default branch like "game90", "main", etc.)
     #   - CLAUDE_RESOURCE_TYPE: Either "issue" or "merge_request"
     #   - CLAUDE_RESOURCE_ID: The IID of the issue or MR
     #   - CLAUDE_AUTHOR: Username who triggered Claude
