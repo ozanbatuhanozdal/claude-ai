@@ -91,7 +91,7 @@ async function runExecutePhase(
 
     // Install Claude Code globally
     const installResult =
-      await $`bun install -g @anthropic-ai/claude-code@1.0.60`;
+      await $`bun install -g @anthropic-ai/claude-code@2.1.15`;
     console.log(installResult.stdout.toString());
 
     if (installResult.exitCode !== 0) {
