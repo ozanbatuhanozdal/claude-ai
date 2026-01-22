@@ -86,7 +86,52 @@ async function runExecutePhase(
 ): Promise<PhaseResult> {
   try {
     console.log("=========================================");
-    console.log("Phase 2: Installing Claude Code...");
+    console.log("Phase 2: Setting up working branch...");
+    console.log("=========================================");
+
+    // CRITICAL: Checkout the correct branch before running Claude
+    const claudeBranch = process.env.CLAUDE_BRANCH;
+    const projectDir = process.env.CI_PROJECT_DIR;
+
+    if (claudeBranch && projectDir) {
+      console.log(`Working branch: ${claudeBranch}`);
+      console.log(`Project directory: ${projectDir}`);
+
+      // Change to project directory
+      process.chdir(projectDir);
+
+      // Fetch the branch if it exists remotely, otherwise create it locally
+      try {
+        console.log(`Fetching branch ${claudeBranch}...`);
+        await $`git fetch origin ${claudeBranch}:${claudeBranch}`.quiet();
+        console.log(`Checking out existing branch ${claudeBranch}...`);
+        await $`git checkout ${claudeBranch}`.quiet();
+      } catch (error) {
+        // Branch doesn't exist remotely, create it locally
+        console.log(`Branch ${claudeBranch} doesn't exist remotely, creating locally...`);
+        try {
+          await $`git checkout -b ${claudeBranch}`.quiet();
+          console.log(`Created new branch: ${claudeBranch}`);
+        } catch (createError) {
+          console.error("Failed to create branch:", createError);
+          throw new Error(`Failed to setup working branch: ${createError}`);
+        }
+      }
+
+      // Verify we're on the correct branch
+      const currentBranchResult = await $`git rev-parse --abbrev-ref HEAD`.quiet();
+      const currentBranch = currentBranchResult.stdout.toString().trim();
+      console.log(`✅ Currently on branch: ${currentBranch}`);
+
+      if (currentBranch !== claudeBranch) {
+        throw new Error(`Branch checkout failed: expected ${claudeBranch}, got ${currentBranch}`);
+      }
+    } else {
+      console.warn("⚠️  CLAUDE_BRANCH not set - working in current branch");
+    }
+
+    console.log("=========================================");
+    console.log("Phase 3: Installing Claude Code...");
     console.log("=========================================");
 
     // Install Claude Code globally
@@ -101,7 +146,7 @@ async function runExecutePhase(
     }
 
     console.log("=========================================");
-    console.log("Phase 3: Installing base-action dependencies...");
+    console.log("Phase 4: Installing base-action dependencies...");
     console.log("=========================================");
 
     // Install base-action dependencies
@@ -120,7 +165,7 @@ async function runExecutePhase(
     }
 
     console.log("=========================================");
-    console.log("Phase 4: Running Claude Code...");
+    console.log("Phase 5: Running Claude Code...");
     console.log("=========================================");
 
     // Check if prompt file exists and read its content
@@ -659,7 +704,7 @@ async function runUpdatePhase(
     }
 
     console.log("=========================================");
-    console.log("Phase 5: Updating tracking comment...");
+    console.log("Phase 6: Updating tracking comment...");
     console.log("=========================================");
 
     // Base-action writes to CI_BUILDS_DIR/claude-execution-output.json
@@ -771,7 +816,7 @@ async function main() {
       throw new Error(`Prepare phase failed: ${prepareResult.error}`);
     }
 
-    // Phase 2: Execute
+    // Phase 2-5: Setup branch, install dependencies, and execute Claude
     executeResult = await runExecutePhase(prepareResult);
 
     if (!executeResult.success) {
@@ -779,7 +824,7 @@ async function main() {
       console.error(`Execute phase failed: ${executeResult.error}`);
     }
 
-    // Phase 3: Update (always run after execution completes)
+    // Phase 6: Update (always run after execution completes)
     // This should run whether execute succeeded or failed
     const updateResult = await runUpdatePhase(prepareResult, executeResult);
     if (!updateResult.success) {

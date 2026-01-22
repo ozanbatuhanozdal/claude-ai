@@ -63,6 +63,14 @@ claude_webhook_handler:
     #   - CLAUDE_CODE_GL_ACCESS_TOKEN: Your GitLab Personal/Project Access Token (with 'api' scope)
     # These variables will be automatically available to the job and do NOT need to be defined here.
 
+    # IMPORTANT: The following variables are automatically set by the webhook server:
+    #   - CLAUDE_BRANCH: The branch Claude should work on (created for issues, source branch for MRs)
+    #   - CLAUDE_RESOURCE_TYPE: Either "issue" or "merge_request"
+    #   - CLAUDE_RESOURCE_ID: The IID of the issue or MR
+    #   - CLAUDE_AUTHOR: Username who triggered Claude
+    #   - CLAUDE_NOTE: The comment text that triggered Claude
+    # Do NOT manually set these - they come from the webhook.
+
     # Claude behavior
     CLAUDE_TRIGGER_PHRASE: "@claude"
     CLAUDE_MODEL: "sonnet"
